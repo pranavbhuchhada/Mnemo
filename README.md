@@ -33,7 +33,7 @@ pip install pillow pystray
 ### GUI
 
 ```bat
-python android_backup.py
+python mnemo_backup.py
 ```
 
 1. Select a destination folder on your PC
@@ -44,7 +44,7 @@ python android_backup.py
 ### CLI
 
 ```bat
-python android_backup_cli.py
+python mnemo_backup_cli.py
 ```
 
 Follow the prompts to choose a destination and select folders.
@@ -82,7 +82,7 @@ The following are skipped by default (all configurable in the GUI):
 ```bat
 pip install pyinstaller pillow pystray
 python generate_icon.py
-pyinstaller --onefile --windowed --icon mnemo.ico --name Mnemo android_backup.py
+pyinstaller --onefile --windowed --icon mnemo.ico --name Mnemo mnemo_backup.py
 ```
 
 The exe will be in the `dist/` folder.
