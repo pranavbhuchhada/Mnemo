@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "VERSION"
+      - "workflows/release.yml"
 
 jobs:
   release:
@@ -75,9 +76,6 @@ jobs:
 
       - name: Install dependencies
         run: pip install pyinstaller pillow pystray pure-python-adb
-
-      - name: Generate icon
-        run: python generate_icon.py
 
       - name: Build GUI exe
         run: pyinstaller --onefile --windowed --icon mnemo.ico --name Mnemo mnemo_backup.py
