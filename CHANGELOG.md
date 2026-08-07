@@ -1,4 +1,12 @@
 ## [1.1.0] - 2026-08-07
+- fix: workflow re-run issues
+- fix: workflow re-run issues
+- fix: workflow re-run issues
+- fix: removed workflow icon genration
+- feat: switch to ppadb for persistent ADB connection, auto changelog on release
+- fix: readme.md
+
+## [1.1.0] - 2026-08-07
 - feat: switch to ppadb for persistent ADB connection, auto changelog on release
 - fix: readme.md
 
