@@ -1,20 +1,12 @@
-## [1.1.0] - 2026-08-07
-- fix: workflow re-run issues
-- fix: workflow re-run issues
-- fix: workflow re-run issues
-- fix: removed workflow icon genration
-- feat: switch to ppadb for persistent ADB connection, auto changelog on release
-- fix: readme.md
-
-## [1.1.0] - 2026-08-07
-- feat: switch to ppadb for persistent ADB connection, auto changelog on release
-- fix: readme.md
-
 # Changelog
 
-## [1.0.0] - 2026-08-07
+## [1.1.0] - 2026-08-07
+- fix: workflow re-run issues
+- fix: removed workflow icon generation
+- feat: switch to ppadb for persistent ADB connection, auto changelog on release
+- fix: readme.md
 
-### Added
+## [1.0.0] - 2026-08-07
 - Initial release
 - Incremental backup via ADB — skips files already on PC (matched by size)
 - GUI with dark theme, two-column layout, color-coded log
@@ -29,4 +21,3 @@
 - Shows connected device name
 - Remembers last destination folder
 - DPI-aware rendering on high-resolution displays
-- Persistent ADB connection via ppadb — no cmd window flashing
