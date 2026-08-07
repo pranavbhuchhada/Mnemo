@@ -1,3 +1,7 @@
+## [1.1.0] - 2026-08-07
+- feat: switch to ppadb for persistent ADB connection, auto changelog on release
+- fix: readme.md
+
 # Changelog
 
 ## [1.0.0] - 2026-08-07
