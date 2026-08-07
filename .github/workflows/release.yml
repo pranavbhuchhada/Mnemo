@@ -64,7 +64,9 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git stash --include-untracked
           git pull --rebase origin main
+          git stash pop 2>/dev/null || true
           git add CHANGELOG.md
           git diff --cached --quiet || git commit -m "chore: release v${{ steps.version.outputs.version }}"
           git tag "v${{ steps.version.outputs.version }}" 2>/dev/null || echo "Tag already exists, skipping"
