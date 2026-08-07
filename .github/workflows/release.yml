@@ -6,7 +6,7 @@ on:
       - main
     paths:
       - "VERSION"
-      - "workflows/release.yml"
+      - ".github/workflows/release.yml"
 
 jobs:
   release:
@@ -64,11 +64,11 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main
           git add CHANGELOG.md
           git diff --cached --quiet || git commit -m "chore: release v${{ steps.version.outputs.version }}"
           git tag "v${{ steps.version.outputs.version }}" 2>/dev/null || echo "Tag already exists, skipping"
-          git pull --rebase origin main
-          git push origin main --follow-tags 2>/dev/null || echo "Nothing new to push"
+          git push origin main --follow-tags
 
       - name: Set up Python
         uses: actions/setup-python@v5
