@@ -56,28 +56,51 @@ WHATSAPP_SENT_DIRS = {"sent"}
 # ADB core
 # ---------------------------------------------------------------------------
 
-def run(cmd: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace")
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
+# Global ppadb device handle — set once at startup
+_device = None
+
+
+def _start_adb_server():
+    """Ensure adb server is running (one subprocess call, no window)."""
+    subprocess.run(
+        ["adb", "start-server"],
+        capture_output=True,
+        creationflags=_NO_WINDOW,
+    )
 
 
 def check_adb() -> bool:
     try:
-        return run(["adb", "version"]).returncode == 0
-    except FileNotFoundError:
+        from ppadb.client import Client as AdbClient
+        _start_adb_server()
+        client = AdbClient(host="127.0.0.1", port=5037)
+        client.version()
+        return True
+    except Exception:
         return False
 
 
-def get_connected_device() -> str | None:
-    result = run(["adb", "devices"])
-    lines = result.stdout.strip().splitlines()
-    devices = [l for l in lines[1:] if l.strip() and "device" in l and "offline" not in l]
-    return devices[0].split()[0] if devices else None
-
-
-def get_device_name() -> str | None:
+def get_connected_device():
+    """Return ppadb device handle or None."""
     try:
-        manufacturer = run(["adb", "shell", "getprop ro.product.manufacturer"]).stdout.strip()
-        model        = run(["adb", "shell", "getprop ro.product.model"]).stdout.strip()
+        from ppadb.client import Client as AdbClient
+        _start_adb_server()
+        client  = AdbClient(host="127.0.0.1", port=5037)
+        devices = client.devices()
+        return devices[0] if devices else None
+    except Exception:
+        return None
+
+
+def get_device_name(device=None) -> str | None:
+    try:
+        d = device or get_connected_device()
+        if not d:
+            return None
+        manufacturer = d.shell("getprop ro.product.manufacturer").strip()
+        model        = d.shell("getprop ro.product.model").strip()
         if manufacturer and model:
             if model.lower().startswith(manufacturer.lower()):
                 return model
@@ -87,14 +110,18 @@ def get_device_name() -> str | None:
         return None
 
 
-def get_remote_files(src: str, skip_whatsapp_sent: bool = False,
+def get_remote_files(device, src: str, skip_whatsapp_sent: bool = False,
                      skip_hidden: bool = True) -> list[tuple[str, int]]:
-    result = run(["adb", "shell", f"find '{src}' -type f -printf '%s %p\\n' 2>/dev/null"])
-    if not result.stdout.strip():
+    try:
+        output = device.shell(f"find '{src}' -type f -printf '%s %p\\n' 2>/dev/null")
+    except Exception:
+        return []
+
+    if not output.strip():
         return []
 
     files = []
-    for line in result.stdout.splitlines():
+    for line in output.splitlines():
         line = line.strip()
         if not line:
             continue
@@ -118,15 +145,16 @@ def get_remote_files(src: str, skip_whatsapp_sent: bool = False,
     return files
 
 
-def incremental_pull(src: str, dest: str, log, progress_cb,
+def incremental_pull(device, src: str, dest: str, log, progress_cb,
                      skip_whatsapp_sent: bool = False,
                      skip_hidden: bool = True,
                      stop_event: threading.Event = None) -> tuple[int, int, int]:
     folder_name = src.rstrip("/").split("/")[-1]
-    local_base = os.path.join(dest, folder_name)
+    local_base  = os.path.join(dest, folder_name)
 
     log(f"Scanning {src}...")
-    remote_files = get_remote_files(src, skip_whatsapp_sent=skip_whatsapp_sent,
+    remote_files = get_remote_files(device, src,
+                                    skip_whatsapp_sent=skip_whatsapp_sent,
                                     skip_hidden=skip_hidden)
 
     if not remote_files:
@@ -136,7 +164,7 @@ def incremental_pull(src: str, dest: str, log, progress_cb,
     to_pull = []
     skipped = 0
     for remote_path, remote_size in remote_files:
-        rel = remote_path[len(src):].lstrip("/")
+        rel        = remote_path[len(src):].lstrip("/")
         local_path = os.path.join(local_base, rel.replace("/", os.sep))
         if os.path.exists(local_path) and os.path.getsize(local_path) == remote_size:
             skipped += 1
@@ -150,26 +178,24 @@ def incremental_pull(src: str, dest: str, log, progress_cb,
         return 0, skipped, 0
 
     pulled = failed = 0
-    width = len(str(len(to_pull)))
+    width      = len(str(len(to_pull)))
     start_time = time.monotonic()
+
     for i, (remote_path, rel, local_path) in enumerate(to_pull, 1):
         if stop_event and stop_event.is_set():
             log("  Stopped.")
             break
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        result = subprocess.run(
-            ["adb", "pull", remote_path, local_path],
-            capture_output=True, encoding="utf-8", errors="replace",
-        )
-        if result.returncode == 0:
+        try:
+            device.pull(remote_path, local_path)
             pulled += 1
             log(f"  [{i:>{width}}/{len(to_pull)}] {rel}")
-        else:
+        except Exception as e:
             failed += 1
-            log(f"  [{i:>{width}}/{len(to_pull)}] FAILED: {rel}")
+            log(f"  [{i:>{width}}/{len(to_pull)}] FAILED: {rel} ({e})")
         elapsed = time.monotonic() - start_time
-        rate = i / elapsed if elapsed > 0 else 0
-        eta = int((len(to_pull) - i) / rate) if rate > 0 else 0
+        rate    = i / elapsed if elapsed > 0 else 0
+        eta     = int((len(to_pull) - i) / rate) if rate > 0 else 0
         progress_cb(i, len(to_pull), eta)
 
     return pulled, skipped, failed
@@ -368,8 +394,9 @@ class App(tk.Tk):
                 self.iconbitmap("mnemo.ico")
             except Exception:
                 pass
-        self._stop_event = threading.Event()
-        self._tray_icon = None
+        self._stop_event  = threading.Event()
+        self._tray_icon   = None
+        self._adb_device  = None
         self._style_ttk()
         self._build_ui()
         self._check_adb_on_start()
@@ -632,6 +659,7 @@ class App(tk.Tk):
         self._log("  Stopping after current file...")
 
     def _check_adb_on_start(self):
+        self._adb_device = None
         if not check_adb():
             self.status_label.configure(text="ADB not found — install Platform Tools")
             self.status_dot.configure(fg=DANGER)
@@ -639,7 +667,8 @@ class App(tk.Tk):
             return
         device = get_connected_device()
         if device:
-            name = get_device_name() or device
+            self._adb_device = device
+            name = get_device_name(device) or str(device)
             self.status_label.configure(text=f"Connected: {name}")
             self.status_dot.configure(fg=SUCCESS)
             self.start_btn.configure(state="normal")
@@ -668,6 +697,13 @@ class App(tk.Tk):
         threading.Thread(target=self._run_backup, args=(folders, dest), daemon=True).start()
 
     def _run_backup(self, folders: list[str], dest: str):
+        device = self._adb_device or get_connected_device()
+        if not device:
+            self.after(0, self._log, "ERROR: No device connected.")
+            self.after(0, self.start_btn.configure, {"state": "normal"})
+            self.after(0, self.stop_btn.configure,  {"state": "disabled"})
+            return
+
         total_pulled = total_skipped = total_failed = 0
         self._log("=" * 48)
         self._log("  Starting backup...")
@@ -678,7 +714,7 @@ class App(tk.Tk):
             if self._stop_event.is_set():
                 break
             pulled, skipped, failed = incremental_pull(
-                folder, dest,
+                device, folder, dest,
                 log=lambda m: self.after(0, self._log, m),
                 progress_cb=lambda c, t, e=0: self.after(0, self._set_progress, c, t, e),
                 skip_whatsapp_sent=skip_sent,

@@ -25,7 +25,7 @@ Incremental Android photo/media backup tool using ADB. Transfers only new or cha
 - Python dependencies:
 
 ```bat
-pip install pillow pystray
+pip install pillow pystray pure-python-adb
 ```
 
 ## Usage
@@ -98,4 +98,9 @@ git commit -m "chore: release v1.1.0"
 git push
 ```
 
-GitHub Actions will automatically create the tag, build `Mnemo.exe` and `MnemoCLI.exe`, and publish a GitHub Release.
+GitHub Actions will automatically:
+1. Generate a changelog from commit messages since the last release
+2. Prepend it to `CHANGELOG.md` and commit it
+3. Create and push the version tag
+4. Build `Mnemo.exe` and `MnemoCLI.exe`
+5. Publish a GitHub Release with the changelog as release notes

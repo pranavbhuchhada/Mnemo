@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Android backup tool using ADB — incremental export of selected phone folders to local PC."""
+"""Mnemo — Android backup tool using ADB, incremental CLI version."""
 
 import subprocess
 import sys
 import os
 
+from ppadb.client import Client as AdbClient
 
 COMMON_FOLDERS = [
     "/sdcard/DCIM",
@@ -16,27 +17,51 @@ COMMON_FOLDERS = [
     "/sdcard/Android/media/com.whatsapp/WhatsApp",
 ]
 
+SKIP_DIRS       = {".thumbnails", "thumbnails", ".thumb"}
+SKIP_EXTENSIONS = {".db", ".nomedia"}
+WHATSAPP_SENT_DIRS = {"sent"}
 
-def run(cmd: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace")
+
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
+
+def _start_adb_server():
+    subprocess.run(["adb", "start-server"], capture_output=True, creationflags=_NO_WINDOW)
 
 
 def check_adb() -> bool:
     try:
-        return run(["adb", "version"]).returncode == 0
-    except FileNotFoundError:
+        _start_adb_server()
+        AdbClient(host="127.0.0.1", port=5037).version()
+        return True
+    except Exception:
         return False
 
 
-def get_connected_device() -> str | None:
-    result = run(["adb", "devices"])
-    lines = result.stdout.strip().splitlines()
-    devices = [l for l in lines[1:] if l.strip() and "device" in l and "offline" not in l]
-    return devices[0].split()[0] if devices else None
+def get_connected_device():
+    try:
+        _start_adb_server()
+        devices = AdbClient(host="127.0.0.1", port=5037).devices()
+        return devices[0] if devices else None
+    except Exception:
+        return None
+
+
+def get_device_name(device) -> str | None:
+    try:
+        manufacturer = device.shell("getprop ro.product.manufacturer").strip()
+        model        = device.shell("getprop ro.product.model").strip()
+        if manufacturer and model:
+            if model.lower().startswith(manufacturer.lower()):
+                return model
+            return f"{manufacturer.capitalize()} {model}"
+        return model or manufacturer or None
+    except Exception:
+        return None
 
 
 def prompt_destination() -> str:
-    print("\nEnter the local destination folder (e.g. D:\\AndroidBackup):")
+    print("\nEnter the local destination folder (e.g. D:\\Backup):")
     while True:
         dest = input("  Destination: ").strip().strip('"')
         if not dest:
@@ -66,7 +91,7 @@ def prompt_folders() -> list[str]:
             print("  Please enter at least one choice.")
             continue
 
-        all_option = len(COMMON_FOLDERS) + 2
+        all_option    = len(COMMON_FOLDERS) + 2
         custom_option = len(COMMON_FOLDERS) + 1
 
         try:
@@ -83,7 +108,7 @@ def prompt_folders() -> list[str]:
             if 1 <= num <= len(COMMON_FOLDERS):
                 selected.append(COMMON_FOLDERS[num - 1])
             elif num == custom_option:
-                print("  Enter custom folder paths (comma-separated, e.g. /sdcard/Telegram,/sdcard/Signal):")
+                print("  Enter custom folder paths (comma-separated):")
                 custom = input("  Custom paths: ").strip()
                 for path in custom.split(","):
                     path = path.strip()
@@ -99,19 +124,15 @@ def prompt_folders() -> list[str]:
         return selected
 
 
-SKIP_DIRS = {".thumbnails", "thumbnails", ".thumb"}
-SKIP_EXTENSIONS = {".db", ".nomedia"}
-WHATSAPP_SENT_DIRS = {"sent"}
-
-
-def get_remote_files(src: str, skip_whatsapp_sent: bool = False) -> list[tuple[str, int]]:
-    """List all files under src on device with their sizes. Returns [(path, size_bytes)]."""
-    result = run(["adb", "shell", f"find '{src}' -type f -printf '%s %p\\n' 2>/dev/null"])
-    if not result.stdout.strip():
+def get_remote_files(device, src: str, skip_whatsapp_sent: bool = False,
+                     skip_hidden: bool = True) -> list[tuple[str, int]]:
+    try:
+        output = device.shell(f"find '{src}' -type f -printf '%s %p\\n' 2>/dev/null")
+    except Exception:
         return []
 
     files = []
-    for line in result.stdout.splitlines():
+    for line in output.splitlines():
         line = line.strip()
         if not line:
             continue
@@ -122,25 +143,28 @@ def get_remote_files(src: str, skip_whatsapp_sent: bool = False) -> list[tuple[s
             continue
 
         parts = path.replace("\\", "/").split("/")
-        if any(p.lower() in SKIP_DIRS or p.startswith(".") for p in parts):
+        if any(p.lower() in SKIP_DIRS for p in parts):
+            continue
+        if skip_hidden and any(p.startswith(".") for p in parts):
             continue
         if skip_whatsapp_sent and any(p.lower() in WHATSAPP_SENT_DIRS for p in parts):
             continue
-        ext = os.path.splitext(path)[1].lower()
-        if ext in SKIP_EXTENSIONS:
+        if os.path.splitext(path)[1].lower() in SKIP_EXTENSIONS:
             continue
 
         files.append((path, size))
     return files
 
 
-def incremental_pull(src: str, dest: str, skip_whatsapp_sent: bool = False) -> tuple[int, int, int]:
-    """Pull only new or changed files. Returns (pulled, skipped, failed)."""
+def incremental_pull(device, src: str, dest: str, skip_whatsapp_sent: bool = False,
+                     skip_hidden: bool = True) -> tuple[int, int, int]:
     folder_name = src.rstrip("/").split("/")[-1]
-    local_base = os.path.join(dest, folder_name)
+    local_base  = os.path.join(dest, folder_name)
 
     print(f"\n  Scanning {src}...")
-    remote_files = get_remote_files(src, skip_whatsapp_sent=skip_whatsapp_sent)
+    remote_files = get_remote_files(device, src,
+                                    skip_whatsapp_sent=skip_whatsapp_sent,
+                                    skip_hidden=skip_hidden)
 
     if not remote_files:
         print(f"  No files found in {src}")
@@ -149,7 +173,7 @@ def incremental_pull(src: str, dest: str, skip_whatsapp_sent: bool = False) -> t
     to_pull = []
     skipped = 0
     for remote_path, remote_size in remote_files:
-        rel = remote_path[len(src):].lstrip("/")
+        rel        = remote_path[len(src):].lstrip("/")
         local_path = os.path.join(local_base, rel.replace("/", os.sep))
         if os.path.exists(local_path) and os.path.getsize(local_path) == remote_size:
             skipped += 1
@@ -158,7 +182,7 @@ def incremental_pull(src: str, dest: str, skip_whatsapp_sent: bool = False) -> t
 
     total = len(remote_files)
     width = len(str(len(to_pull)))
-    print(f"  {total} files found — {skipped} already backed up, {len(to_pull)} to pull")
+    print(f"  {total} files — {skipped} already backed up, {len(to_pull)} to pull")
 
     if not to_pull:
         return 0, skipped, 0
@@ -166,23 +190,20 @@ def incremental_pull(src: str, dest: str, skip_whatsapp_sent: bool = False) -> t
     pulled = failed = 0
     for i, (remote_path, rel, local_path) in enumerate(to_pull, 1):
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        result = subprocess.run(
-            ["adb", "pull", remote_path, local_path],
-            capture_output=True, encoding="utf-8", errors="replace",
-        )
-        if result.returncode == 0:
+        try:
+            device.pull(remote_path, local_path)
             pulled += 1
             print(f"  [{i:>{width}}/{len(to_pull)}] {rel}")
-        else:
+        except Exception as e:
             failed += 1
-            print(f"  [{i:>{width}}/{len(to_pull)}] FAILED: {rel}")
+            print(f"  [{i:>{width}}/{len(to_pull)}] FAILED: {rel} ({e})")
 
     return pulled, skipped, failed
 
 
 def main():
     print("=" * 50)
-    print("  Android Backup Tool (ADB) — Incremental")
+    print("  Mnemo — Incremental Android Backup")
     print("=" * 50)
 
     if not check_adb():
@@ -199,9 +220,10 @@ def main():
         print("  3. Accept the RSA key prompt on your phone")
         sys.exit(1)
 
-    print(f"  Device found: {device}")
+    name = get_device_name(device) or str(device)
+    print(f"  Device found: {name}")
 
-    dest = prompt_destination()
+    dest    = prompt_destination()
     folders = prompt_folders()
 
     skip_sent = False
@@ -209,15 +231,22 @@ def main():
         ans = input("\nSkip WhatsApp Sent media? [Y/n]: ").strip().lower()
         skip_sent = ans in ("", "y", "yes")
 
+    ans = input("Skip hidden files and folders? [Y/n]: ").strip().lower()
+    skip_hidden = ans in ("", "y", "yes")
+
     print(f"\nExporting {len(folders)} folder(s) to: {dest}")
     print("-" * 50)
 
     total_pulled = total_skipped = total_failed = 0
     for folder in folders:
-        pulled, skipped, failed = incremental_pull(folder, dest, skip_whatsapp_sent=skip_sent)
-        total_pulled += pulled
+        pulled, skipped, failed = incremental_pull(
+            device, folder, dest,
+            skip_whatsapp_sent=skip_sent,
+            skip_hidden=skip_hidden,
+        )
+        total_pulled  += pulled
         total_skipped += skipped
-        total_failed += failed
+        total_failed  += failed
 
     print("\n" + "=" * 50)
     print("  Summary")

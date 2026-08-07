@@ -27,13 +27,46 @@ jobs:
           VERSION=$(cat VERSION | tr -d '[:space:]')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Create tag
+      - name: Generate changelog entry from commits
+        id: changelog
+        shell: bash
+        run: |
+          VERSION=$(cat VERSION | tr -d '[:space:]')
+          DATE=$(date +%Y-%m-%d)
+
+          # Get last tag, fall back to first commit if no tags exist
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || git rev-list --max-parents=0 HEAD)
+
+          # Collect commit messages since last tag, skip version bumps and merge commits
+          COMMITS=$(git log "$LAST_TAG"..HEAD --pretty=format:"- %s" --no-merges \
+            | grep -v "^- chore: bump version" \
+            | grep -v "^- chore: release" \
+            || echo "- Maintenance and improvements")
+
+          # Build the new entry
+          ENTRY="## [$VERSION] - $DATE"$'\n'"$COMMITS"$'\n'
+
+          # Prepend to CHANGELOG.md
+          echo "$ENTRY" > /tmp/new_entry.md
+          if [ -f CHANGELOG.md ]; then
+            cat CHANGELOG.md >> /tmp/new_entry.md
+          fi
+          mv /tmp/new_entry.md CHANGELOG.md
+
+          # Save notes for the release body
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          echo "$COMMITS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Commit changelog and tag
         shell: bash
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          git commit -m "chore: release v${{ steps.version.outputs.version }}"
           git tag "v${{ steps.version.outputs.version }}"
-          git push origin "v${{ steps.version.outputs.version }}"
+          git push origin main --follow-tags
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -41,7 +74,10 @@ jobs:
           python-version: "3.13"
 
       - name: Install dependencies
-        run: pip install pyinstaller pillow pystray
+        run: pip install pyinstaller pillow pystray pure-python-adb
+
+      - name: Generate icon
+        run: python generate_icon.py
 
       - name: Build GUI exe
         run: pyinstaller --onefile --windowed --icon mnemo.ico --name Mnemo mnemo_backup.py
@@ -54,6 +90,7 @@ jobs:
         with:
           tag_name: v${{ steps.version.outputs.version }}
           name: v${{ steps.version.outputs.version }}
+          body: ${{ steps.changelog.outputs.notes }}
           draft: false
           prerelease: false
           files: |
