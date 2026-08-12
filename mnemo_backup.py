@@ -51,6 +51,34 @@ SKIP_DIRS = {".thumbnails", "thumbnails", ".thumb"}
 SKIP_EXTENSIONS = {".db", ".nomedia"}
 WHATSAPP_SENT_DIRS = {"sent"}
 
+# Brand-specific folders keyed by manufacturer name (lowercase substring match)
+BRAND_FOLDERS: dict[str, dict[str, str]] = {
+    "samsung": {
+        "/sdcard/Android/media/com.samsung.android.messaging": "Samsung Messages",
+        "/sdcard/Ringtones": "Ringtones",
+    },
+    "xiaomi": {
+        "/sdcard/MIUI/Gallery": "MIUI Gallery",
+        "/sdcard/Android/media/com.miui.gallery": "Mi Gallery",
+    },
+    "huawei": {
+        "/sdcard/Android/media/com.huawei.himovie.overseas": "Huawei Video",
+        "/sdcard/Huawei/Themes": "Huawei Themes",
+    },
+    "oneplus": {
+        "/sdcard/Android/media/com.oneplus.gallery": "OnePlus Gallery",
+    },
+    "oppo": {
+        "/sdcard/Android/media/com.coloros.gallery3d": "OPPO Gallery",
+    },
+    "vivo": {
+        "/sdcard/Android/media/com.vivo.gallery": "Vivo Gallery",
+    },
+    "google": {
+        "/sdcard/Android/media/com.google.android.apps.photos": "Google Photos",
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # ADB core
@@ -92,6 +120,15 @@ def get_connected_device():
         return devices[0] if devices else None
     except Exception:
         return None
+
+
+def get_brand_folders(manufacturer: str) -> dict[str, str]:
+    """Return brand-specific {path: label} for the given manufacturer string."""
+    m = manufacturer.lower()
+    for brand, folders in BRAND_FOLDERS.items():
+        if brand in m:
+            return folders
+    return {}
 
 
 def get_device_name(device=None) -> str | None:
@@ -482,6 +519,11 @@ class App(tk.Tk):
                 self._chk(fc, "    ↳ Skip Sent", self.skip_sent_var, small=True).pack(
                     anchor="w", padx=12)
 
+        # Brand-specific folders — populated on device connect
+        self._brand_frame = tk.Frame(fc, bg=PANEL)
+        self._brand_frame.pack(fill="x")
+        self._brand_vars: dict[str, tk.BooleanVar] = {}
+
         tk.Frame(fc, bg=BORDER, height=1).pack(fill="x", padx=12, pady=6)
         self._chk(fc, "Skip hidden files", self.skip_hidden_var, small=True).pack(
             anchor="w", padx=12, pady=(0, 10))
@@ -658,8 +700,24 @@ class App(tk.Tk):
         self.stop_btn.configure(state="disabled")
         self._log("  Stopping after current file...")
 
+    def _populate_brand_folders(self, manufacturer: str):
+        for w in self._brand_frame.winfo_children():
+            w.destroy()
+        self._brand_vars.clear()
+        folders = get_brand_folders(manufacturer)
+        if not folders:
+            return
+        tk.Frame(self._brand_frame, bg=BORDER, height=1).pack(fill="x", padx=12, pady=(0, 4))
+        tk.Label(self._brand_frame, text=f"{manufacturer.capitalize()} folders".upper(),
+                 bg=PANEL, fg=MUTED, font=("Segoe UI", 7, "bold")).pack(anchor="w", padx=12, pady=(0, 2))
+        for path, label in folders.items():
+            var = tk.BooleanVar(value=True)
+            self._chk(self._brand_frame, label, var).pack(anchor="w", padx=12, pady=1)
+            self._brand_vars[path] = var
+
     def _check_adb_on_start(self):
         self._adb_device = None
+        self._populate_brand_folders("")
         if not check_adb():
             self.status_label.configure(text="ADB not found — install Platform Tools")
             self.status_dot.configure(fg=DANGER)
@@ -672,6 +730,11 @@ class App(tk.Tk):
             self.status_label.configure(text=f"Connected: {name}")
             self.status_dot.configure(fg=SUCCESS)
             self.start_btn.configure(state="normal")
+            try:
+                manufacturer = device.shell("getprop ro.product.manufacturer").strip()
+                self._populate_brand_folders(manufacturer)
+            except Exception:
+                pass
         else:
             self.status_label.configure(text="No device — connect & enable USB Debugging")
             self.status_dot.configure(fg=WARN)
@@ -683,6 +746,7 @@ class App(tk.Tk):
             messagebox.showwarning("No destination", "Please select a destination folder.")
             return
         folders = [f for f, var in self.folder_vars.items() if var.get()]
+        folders += [f for f, var in self._brand_vars.items() if var.get()]
         folders += list(self.custom_listbox.get(0, "end"))
         if not folders:
             messagebox.showwarning("No folders", "Please select at least one folder to back up.")
