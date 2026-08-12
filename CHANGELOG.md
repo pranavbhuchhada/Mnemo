@@ -1,3 +1,6 @@
+## [1.2.0] - 2026-08-12
+- feat: changed UI to white theme
+
 ## [1.1.1] - 2026-08-12
 - feat: auto-detect device brand and show brand-specific folders
 - chore: updated changelog
