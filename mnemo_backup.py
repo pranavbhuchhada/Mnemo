@@ -268,21 +268,21 @@ def save_settings(data: dict):
 # Color palette
 # ---------------------------------------------------------------------------
 
-BG       = "#0f0f1a"
-SURFACE  = "#1a1a2e"
-PANEL    = "#22223a"
-BORDER   = "#36365a"
-ACCENT   = "#818cf8"
-TEXT     = "#e2e8f0"
-MUTED    = "#64748b"
-SUCCESS  = "#34d399"
-DANGER   = "#f87171"
-WARN     = "#fbbf24"
-LOG_BG   = "#09090f"
-INPUT    = "#1e1e32"
+BG       = "#f8f9fb"
+SURFACE  = "#ffffff"
+PANEL    = "#f1f3f7"
+BORDER   = "#dde1ea"
+ACCENT   = "#4f46e5"
+TEXT     = "#1e1e2e"
+MUTED    = "#6b7280"
+SUCCESS  = "#059669"
+DANGER   = "#dc2626"
+WARN     = "#d97706"
+LOG_BG   = "#f8f9fb"
+INPUT    = "#ffffff"
 BTN_PRI  = "#4f46e5"
-BTN_SEC  = "#252540"
-BTN_STOP = "#7f1d1d"
+BTN_SEC  = "#e9eaf0"
+BTN_STOP = "#fef2f2"
 
 
 def _hover(btn, enter_bg, leave_bg):
@@ -462,8 +462,8 @@ class App(tk.Tk):
 
     def _btn(self, parent, text, command, primary=False, danger=False, **kw):
         bg    = BTN_PRI if primary else (BTN_STOP if danger else BTN_SEC)
-        hover = "#6366f1" if primary else ("#991b1b" if danger else BORDER)
-        fg    = "white" if (primary or danger) else TEXT
+        hover = "#6366f1" if primary else ("#fee2e2" if danger else BORDER)
+        fg    = "white" if primary else (DANGER if danger else TEXT)
         b = tk.Button(parent, text=text, command=command,
                       bg=bg, fg=fg, relief="flat", bd=0,
                       font=("Segoe UI", 9, "bold" if primary else "normal"),
