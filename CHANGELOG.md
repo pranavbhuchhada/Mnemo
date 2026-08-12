@@ -1,3 +1,7 @@
+## [1.1.1] - 2026-08-12
+- feat: auto-detect device brand and show brand-specific folders
+- chore: updated changelog
+
 # Changelog
 
 ## [1.1.0] - 2026-08-07
