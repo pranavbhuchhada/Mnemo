@@ -1,3 +1,6 @@
+## [1.3] - 2026-08-22
+- feat: minor bugs and add instrcutions
+
 ## [1.2.0] - 2026-08-12
 - feat: changed UI to white theme
 
