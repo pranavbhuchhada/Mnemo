@@ -6,7 +6,6 @@ on:
       - main
     paths:
       - "VERSION"
-      - ".github/workflows/release.yml"
 
 jobs:
   release:
@@ -42,7 +41,10 @@ jobs:
           COMMITS=$(git log "$LAST_TAG"..HEAD --pretty=format:"- %s" --no-merges \
             | grep -v "^- chore: bump version" \
             | grep -v "^- chore: release" \
-            || echo "- Maintenance and improvements")
+            || true)
+          if [ -z "$COMMITS" ]; then
+            COMMITS="- Maintenance and improvements"
+          fi
 
           # Build the new entry
           ENTRY="## [$VERSION] - $DATE"$'\n'"$COMMITS"$'\n'
@@ -59,18 +61,14 @@ jobs:
           echo "$COMMITS" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Commit changelog and tag
+      - name: Commit changelog
         shell: bash
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git stash --include-untracked
-          git pull --rebase origin main
-          git stash pop 2>/dev/null || true
           git add CHANGELOG.md
           git diff --cached --quiet || git commit -m "chore: release v${{ steps.version.outputs.version }}"
-          git tag "v${{ steps.version.outputs.version }}" 2>/dev/null || echo "Tag already exists, skipping"
-          git push origin main --follow-tags
+          git push origin main
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -81,7 +79,7 @@ jobs:
         run: pip install pyinstaller pillow pystray pure-python-adb
 
       - name: Build GUI exe
-        run: pyinstaller --onefile --windowed --icon mnemo.ico --name Mnemo mnemo_backup.py
+        run: pyinstaller --onefile --windowed --icon mnemo.ico --name Mnemo --add-data "mnemo.ico;." --add-data "mnemo.png;." --add-data "VERSION;." mnemo_backup.py
 
       - name: Build CLI exe
         run: pyinstaller --onefile --name MnemoCLI mnemo_backup_cli.py
@@ -94,6 +92,7 @@ jobs:
           body: ${{ steps.changelog.outputs.notes }}
           draft: false
           prerelease: false
+          make_latest: true
           files: |
             dist/Mnemo.exe
             dist/MnemoCLI.exe

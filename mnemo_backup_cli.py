@@ -5,7 +5,12 @@ import subprocess
 import sys
 import os
 
-from ppadb.client import Client as AdbClient
+try:
+    from ppadb.client import Client as AdbClient
+except ImportError:
+    print("ERROR: 'pure-python-adb' is not installed.")
+    print("Run: pip install pure-python-adb")
+    sys.exit(1)
 
 COMMON_FOLDERS = [
     "/sdcard/DCIM",
@@ -145,7 +150,8 @@ def get_remote_files(device, src: str, skip_whatsapp_sent: bool = False,
         parts = path.replace("\\", "/").split("/")
         if any(p.lower() in SKIP_DIRS for p in parts):
             continue
-        if skip_hidden and any(p.startswith(".") for p in parts):
+        rel_parts = path[len(src):].lstrip("/").replace("\\", "/").split("/")
+        if skip_hidden and any(p.startswith(".") for p in rel_parts):
             continue
         if skip_whatsapp_sent and any(p.lower() in WHATSAPP_SENT_DIRS for p in parts):
             continue
@@ -195,8 +201,12 @@ def incremental_pull(device, src: str, dest: str, skip_whatsapp_sent: bool = Fal
             pulled += 1
             print(f"  [{i:>{width}}/{len(to_pull)}] {rel}")
         except Exception as e:
+            err = str(e)
             failed += 1
-            print(f"  [{i:>{width}}/{len(to_pull)}] FAILED: {rel} ({e})")
+            print(f"  [{i:>{width}}/{len(to_pull)}] FAILED: {rel} ({err})")
+            if "closed" in err.lower() or "connection" in err.lower() or "broken pipe" in err.lower():
+                print("  Device disconnected — aborting.")
+                break
 
     return pulled, skipped, failed
 
@@ -207,8 +217,16 @@ def main():
     print("=" * 50)
 
     if not check_adb():
-        print("\nERROR: 'adb' not found. Install Android Platform Tools and add to PATH.")
-        print("Download: https://developer.android.com/tools/releases/platform-tools")
+        print("\nERROR: 'adb' not found.")
+        print("\nSetup steps:")
+        print("  1. Download Android Platform Tools:")
+        print("     https://developer.android.com/tools/releases/platform-tools")
+        print("  2. Extract the zip and add the folder to your system PATH")
+        print("     e.g. C:\\platform-tools")
+        print("  3. Enable USB Debugging on your phone:")
+        print("     Settings → Developer Options → USB Debugging")
+        print("  4. Reconnect your phone and re-run this tool")
+        print("\nVerify setup: open a terminal and run: adb devices")
         sys.exit(1)
 
     print("\nChecking for connected Android device...")
@@ -238,15 +256,20 @@ def main():
     print("-" * 50)
 
     total_pulled = total_skipped = total_failed = 0
-    for folder in folders:
-        pulled, skipped, failed = incremental_pull(
-            device, folder, dest,
-            skip_whatsapp_sent=skip_sent,
-            skip_hidden=skip_hidden,
-        )
-        total_pulled  += pulled
-        total_skipped += skipped
-        total_failed  += failed
+    interrupted = False
+    try:
+        for folder in folders:
+            pulled, skipped, failed = incremental_pull(
+                device, folder, dest,
+                skip_whatsapp_sent=skip_sent,
+                skip_hidden=skip_hidden,
+            )
+            total_pulled  += pulled
+            total_skipped += skipped
+            total_failed  += failed
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\n\n  Interrupted — partial files may exist in destination.")
 
     print("\n" + "=" * 50)
     print("  Summary")
@@ -255,7 +278,7 @@ def main():
     print(f"  Skipped (exists): {total_skipped}")
     if total_failed:
         print(f"  Failed:           {total_failed}")
-    print("\nDone.")
+    print("\nStopped." if interrupted else "\nDone.")
 
 
 if __name__ == "__main__":

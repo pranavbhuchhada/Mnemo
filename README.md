@@ -15,6 +15,7 @@ Incremental Android photo/media backup tool using ADB. Transfers only new or cha
 - System tray icon — minimize to tray, restore with a click
 - Desktop notification when backup completes
 - Shows connected device name (e.g. Samsung Galaxy S23)
+- Auto-detects device brand and shows brand-specific folder suggestions (Samsung, Xiaomi, Huawei, OnePlus, OPPO, Vivo, Google)
 - DPI-aware — sharp rendering on high-resolution displays
 
 ## Requirements
@@ -32,6 +33,10 @@ pip install pillow pystray pure-python-adb
 
 ### GUI
 
+Pre-built `Mnemo.exe` (no Python required) is available on the [Releases](../../releases) page.
+
+Or run from source:
+
 ```bat
 python mnemo_backup.py
 ```
@@ -42,6 +47,10 @@ python mnemo_backup.py
 4. Click **▶ Start Backup**
 
 ### CLI
+
+Pre-built `MnemoCLI.exe` (no Python required) is available on the [Releases](../../releases) page.
+
+Or run from source:
 
 ```bat
 python mnemo_backup_cli.py
@@ -80,12 +89,20 @@ The following are skipped by default (all configurable in the GUI):
 ## Building an EXE
 
 ```bat
-pip install pyinstaller pillow pystray
-python generate_icon.py
-pyinstaller --onefile --windowed --icon mnemo.ico --name Mnemo mnemo_backup.py
+pip install pyinstaller pillow pystray pure-python-adb
 ```
 
-The exe will be in the `dist/` folder.
+GUI:
+```bat
+pyinstaller --onefile --windowed --icon mnemo.ico --name Mnemo --add-data "mnemo.ico;." --add-data "mnemo.png;." --add-data "VERSION;." mnemo_backup.py
+```
+
+CLI:
+```bat
+pyinstaller --onefile --name MnemoCLI mnemo_backup_cli.py
+```
+
+Both executables will be in the `dist/` folder.
 
 ## Releasing
 

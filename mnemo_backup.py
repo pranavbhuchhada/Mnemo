@@ -11,6 +11,11 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import ctypes
 
+def _asset(name: str) -> str:
+    """Resolve a bundled asset path for both dev and PyInstaller onefile."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
+
 try:
     import pystray
     from PIL import Image as PilImage
@@ -171,7 +176,8 @@ def get_remote_files(device, src: str, skip_whatsapp_sent: bool = False,
         parts = path.replace("\\", "/").split("/")
         if any(p.lower() in SKIP_DIRS for p in parts):
             continue
-        if skip_hidden and any(p.startswith(".") for p in parts):
+        rel_parts = path[len(src):].lstrip("/").replace("\\", "/").split("/")
+        if skip_hidden and any(p.startswith(".") for p in rel_parts):
             continue
         if skip_whatsapp_sent and any(p.lower() in WHATSAPP_SENT_DIRS for p in parts):
             continue
@@ -185,14 +191,21 @@ def get_remote_files(device, src: str, skip_whatsapp_sent: bool = False,
 def incremental_pull(device, src: str, dest: str, log, progress_cb,
                      skip_whatsapp_sent: bool = False,
                      skip_hidden: bool = True,
-                     stop_event: threading.Event = None) -> tuple[int, int, int]:
+                     stop_event: threading.Event = None,
+                     global_offset: int = 0,
+                     global_total: int = 0,
+                     _prefetched=None) -> tuple[int, int, int]:
     folder_name = src.rstrip("/").split("/")[-1]
     local_base  = os.path.join(dest, folder_name)
 
-    log(f"Scanning {src}...")
-    remote_files = get_remote_files(device, src,
-                                    skip_whatsapp_sent=skip_whatsapp_sent,
-                                    skip_hidden=skip_hidden)
+    if _prefetched is not None:
+        remote_files = _prefetched
+        log(f"Scanning {src}...")
+    else:
+        log(f"Scanning {src}...")
+        remote_files = get_remote_files(device, src,
+                                        skip_whatsapp_sent=skip_whatsapp_sent,
+                                        skip_hidden=skip_hidden)
 
     if not remote_files:
         log(f"  No files found in {src}")
@@ -228,12 +241,18 @@ def incremental_pull(device, src: str, dest: str, log, progress_cb,
             pulled += 1
             log(f"  [{i:>{width}}/{len(to_pull)}] {rel}")
         except Exception as e:
+            err = str(e)
             failed += 1
-            log(f"  [{i:>{width}}/{len(to_pull)}] FAILED: {rel} ({e})")
+            log(f"  [{i:>{width}}/{len(to_pull)}] FAILED: {rel} ({err})")
+            if "closed" in err.lower() or "connection" in err.lower() or "broken pipe" in err.lower():
+                log("  Device disconnected — aborting.")
+                break
         elapsed = time.monotonic() - start_time
         rate    = i / elapsed if elapsed > 0 else 0
-        eta     = int((len(to_pull) - i) / rate) if rate > 0 else 0
-        progress_cb(i, len(to_pull), eta)
+        g_current = global_offset + i
+        g_total   = global_total or len(to_pull)
+        eta       = int((g_total - g_current) / rate) if rate > 0 else 0
+        progress_cb(g_current, g_total, eta, rate)
 
     return pulled, skipped, failed
 
@@ -258,8 +277,10 @@ def load_settings() -> dict:
 
 def save_settings(data: dict):
     try:
+        existing = load_settings()
+        existing.update(data)
         with open(SETTINGS_FILE, "w") as f:
-            json.dump(data, f, indent=2)
+            json.dump(existing, f, indent=2)
     except Exception:
         pass
 
@@ -304,6 +325,9 @@ class PhoneBrowserDialog(tk.Toplevel):
         self.transient(parent)
         self.grab_set()
 
+        self._device      = getattr(parent, "_adb_device", None)
+        _shv = getattr(parent, "skip_hidden_var", None)
+        self._skip_hidden = _shv.get() if _shv else True
         self.current_path = start_path
         self.selected_path = None
 
@@ -364,23 +388,30 @@ class PhoneBrowserDialog(tk.Toplevel):
         self.path_var.set(path)
         self.listbox.delete(0, "end")
         self.listbox.insert("end", "  ⏳ loading...")
-        self.update()
+        threading.Thread(target=self._load_worker, args=(path,), daemon=True).start()
 
-        result = run(["adb", "shell", f"ls -d '{path}'/*/  2>/dev/null"])
-        self.listbox.delete(0, "end")
-
+    def _load_worker(self, path):
         dirs = []
-        for line in result.stdout.splitlines():
-            line = line.strip().rstrip("/")
-            if line:
-                dirs.append(line)
+        if self._device:
+            try:
+                output = self._device.shell(f"ls -d '{path}'/*/  2>/dev/null")
+                for line in output.splitlines():
+                    line = line.strip().rstrip("/")
+                    if line:
+                        dirs.append(line)
+            except Exception:
+                pass
+        self.after(0, self._load_done, dirs)
 
+    def _load_done(self, dirs):
+        self.listbox.delete(0, "end")
         if not dirs:
             self.listbox.insert("end", "  (no subfolders)")
         for d in sorted(dirs):
             name = d.split("/")[-1]
-            if not name.startswith("."):
-                self.listbox.insert("end", f"  📁 {name}")
+            if self._skip_hidden and name.startswith("."):
+                continue
+            self.listbox.insert("end", f"  📁 {name}")
 
     def _on_double_click(self, _event):
         sel = self.listbox.curselection()
@@ -415,7 +446,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         try:
-            _ver = open("VERSION").read().strip()
+            _ver = open(_asset("VERSION")).read().strip()
         except Exception:
             _ver = ""
         self.title(f"Mnemo {_ver}" if _ver else "Mnemo")
@@ -423,12 +454,12 @@ class App(tk.Tk):
         self.resizable(False, False)
         try:
             from PIL import Image as _Img, ImageTk as _ITk
-            _img = _Img.open("mnemo.png").resize((64, 64), _Img.LANCZOS)
+            _img = _Img.open(_asset("mnemo.png")).resize((64, 64), _Img.LANCZOS)
             self._icon_photo = _ITk.PhotoImage(_img)
             self.iconphoto(True, self._icon_photo)
         except Exception:
             try:
-                self.iconbitmap("mnemo.ico")
+                self.iconbitmap(_asset("mnemo.ico"))
             except Exception:
                 pass
         self._stop_event  = threading.Event()
@@ -436,6 +467,7 @@ class App(tk.Tk):
         self._adb_device  = None
         self._style_ttk()
         self._build_ui()
+        self._is_first_adb_check = True
         self._check_adb_on_start()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         if TRAY_AVAILABLE:
@@ -472,13 +504,42 @@ class App(tk.Tk):
         return b
 
     def _chk(self, parent, text, var, small=False):
-        return tk.Checkbutton(parent, text=text, variable=var,
-                              bg=PANEL, fg=MUTED if small else TEXT,
-                              selectcolor=ACCENT,
-                              activebackground=PANEL, activeforeground=TEXT,
-                              disabledforeground=MUTED,
-                              font=("Segoe UI", 8 if small else 9),
-                              indicatoron=True)
+        fg   = MUTED if small else TEXT
+        font = ("Segoe UI", 8 if small else 9)
+        frame = tk.Frame(parent, bg=PANEL, cursor="hand2")
+
+        box_size = 14
+        canvas = tk.Canvas(frame, width=box_size, height=box_size,
+                           bg=PANEL, highlightthickness=0, bd=0)
+        canvas.pack(side="left", padx=(0, 5))
+        label = tk.Label(frame, text=text, bg=PANEL, fg=fg, font=font)
+        label.pack(side="left")
+
+        def _draw():
+            canvas.delete("all")
+            if var.get():
+                canvas.create_rectangle(1, 1, box_size - 1, box_size - 1,
+                                        fill=ACCENT, outline=ACCENT)
+                # checkmark
+                canvas.create_line(3, 7, 6, 11, 11, 3,
+                                   fill="white", width=2, capstyle="round", joinstyle="round")
+            else:
+                canvas.create_rectangle(1, 1, box_size - 1, box_size - 1,
+                                        fill=SURFACE, outline=BORDER)
+
+        def _toggle(_event=None):
+            var.set(not var.get())
+
+        var.trace_add("write", lambda *_: _draw())
+        for widget in (frame, canvas, label):
+            widget.bind("<Button-1>", _toggle)
+
+        _draw()
+        # expose configure so callers can disable the widget
+        frame.configure_state = lambda state: [
+            w.configure(state=state) for w in (label,)
+        ]
+        return frame
 
     def _build_ui(self):
         # ── Header ──────────────────────────────────────────────────────────
@@ -493,6 +554,7 @@ class App(tk.Tk):
         self.status_dot.pack(side="right", padx=(0, 16))
         self.status_label = tk.Label(hdr, bg=SURFACE, fg=MUTED, font=("Segoe UI", 9))
         self.status_label.pack(side="right")
+        self.status_label.bind("<Button-1>", self._on_status_click)
         tk.Frame(self, bg=BORDER, height=1).pack(fill="x")
 
         # ── Two-column body ──────────────────────────────────────────────────
@@ -507,11 +569,15 @@ class App(tk.Tk):
         # ── Folders (left column) ────────────────────────────────────────────
         fc = self._card(left, "Phone Folders")
         self.folder_vars   = {}
-        self.skip_sent_var = tk.BooleanVar(value=True)
-        self.skip_hidden_var = tk.BooleanVar(value=True)
+        _s = load_settings()
+        _saved_folders  = _s.get("selected_folders", {})
+        _saved_custom   = _s.get("custom_folders", [])
+        self.skip_sent_var   = tk.BooleanVar(value=_s.get("skip_sent", True))
+        self.skip_hidden_var = tk.BooleanVar(value=_s.get("skip_hidden", True))
 
         for folder in COMMON_FOLDERS:
-            var = tk.BooleanVar(value=True)
+            default = _saved_folders.get(folder, True)
+            var = tk.BooleanVar(value=default)
             self._chk(fc, FOLDER_LABELS.get(folder, folder), var).pack(
                 anchor="w", padx=12, pady=1)
             self.folder_vars[folder] = var
@@ -533,10 +599,12 @@ class App(tk.Tk):
         dest_row = tk.Frame(dc, bg=PANEL)
         dest_row.pack(fill="x", padx=12, pady=10)
         self.dest_var = tk.StringVar(value=load_settings().get("last_destination", ""))
-        self.dest_var.trace_add("write", lambda *_: save_settings({"last_destination": self.dest_var.get().strip()}))
-        tk.Entry(dest_row, textvariable=self.dest_var, bg=INPUT, fg=TEXT,
-                 insertbackground=TEXT, relief="flat", bd=0,
-                 font=("Segoe UI", 9), width=32).pack(side="left", ipady=5, padx=(0, 8))
+        dest_entry = tk.Entry(dest_row, textvariable=self.dest_var, bg=INPUT, fg=TEXT,
+                              insertbackground=TEXT, relief="flat", bd=0,
+                              font=("Segoe UI", 9), width=32)
+        dest_entry.pack(side="left", ipady=5, padx=(0, 8))
+        dest_entry.bind("<FocusOut>", lambda _: save_settings({"last_destination": self.dest_var.get().strip()}))
+        dest_entry.bind("<Return>",   lambda _: save_settings({"last_destination": self.dest_var.get().strip()}))
         self._btn(dest_row, "Browse…", self._browse_dest).pack(side="left")
 
         # ── Additional folders (right column) ────────────────────────────────
@@ -605,9 +673,17 @@ class App(tk.Tk):
         if TRAY_AVAILABLE:
             self._btn(bar, "⊟  Minimize to Tray", self._on_close).pack(side="right", padx=(0, 16))
 
+        # Persist checkbox state on every toggle
+        for var in list(self.folder_vars.values()) + [self.skip_sent_var, self.skip_hidden_var]:
+            var.trace_add("write", lambda *_: self._save_folder_settings())
+
+        # Restore saved custom folders
+        for path in _saved_custom:
+            self.custom_listbox.insert("end", path)
+
     def _setup_tray(self):
         try:
-            img = PilImage.open("mnemo.ico")
+            img = PilImage.open(_asset("mnemo.png"))
         except Exception:
             img = PilImage.new("RGBA", (64, 64), (79, 70, 229, 255))
         menu = pystray.Menu(
@@ -646,6 +722,7 @@ class App(tk.Tk):
         path = filedialog.askdirectory(title="Select destination folder")
         if path:
             self.dest_var.set(path)
+            save_settings({"last_destination": path})
 
     def _browse_phone_folder(self):
         dialog = PhoneBrowserDialog(self)
@@ -661,11 +738,22 @@ class App(tk.Tk):
         if path not in list(self.custom_listbox.get(0, "end")):
             self.custom_listbox.insert("end", path)
         self.custom_var.set("")
+        self._save_folder_settings()
 
     def _remove_custom_folder(self):
         sel = self.custom_listbox.curselection()
         if sel:
             self.custom_listbox.delete(sel[0])
+            self._save_folder_settings()
+
+    def _save_folder_settings(self):
+        save_settings({
+            "selected_folders":       {f: v.get() for f, v in self.folder_vars.items()},
+            "selected_brand_folders": {f: v.get() for f, v in self._brand_vars.items()},
+            "custom_folders":         list(self.custom_listbox.get(0, "end")),
+            "skip_sent":              self.skip_sent_var.get(),
+            "skip_hidden":            self.skip_hidden_var.get(),
+        })
 
     def _log(self, msg: str):
         self.log_box.configure(state="normal")
@@ -684,16 +772,18 @@ class App(tk.Tk):
         self.log_box.see("end")
         self.log_box.configure(state="disabled")
 
-    def _set_progress(self, current: int, total: int, eta: int = 0):
+    def _set_progress(self, current: int, total: int, eta: int = 0, rate: float = 0):
         self.progress["maximum"] = total
         self.progress["value"] = current
         pct = int(current / total * 100) if total else 0
         self.progress_label.configure(text=f"{current} / {total} files  ({pct}%)")
+        parts = []
         if eta > 0:
             m, s = divmod(eta, 60)
-            self.eta_label.configure(text=f"ETA {m}m {s:02d}s" if m else f"ETA {s}s")
-        else:
-            self.eta_label.configure(text="")
+            parts.append(f"ETA {m}m {s:02d}s" if m else f"ETA {s}s")
+        if rate > 0:
+            parts.append(f"{rate:.1f} files/s")
+        self.eta_label.configure(text="  ".join(parts))
 
     def _stop_backup(self):
         self._stop_event.set()
@@ -710,57 +800,105 @@ class App(tk.Tk):
         tk.Frame(self._brand_frame, bg=BORDER, height=1).pack(fill="x", padx=12, pady=(0, 4))
         tk.Label(self._brand_frame, text=f"{manufacturer.capitalize()} folders".upper(),
                  bg=PANEL, fg=MUTED, font=("Segoe UI", 7, "bold")).pack(anchor="w", padx=12, pady=(0, 2))
+        saved_brand = load_settings().get("selected_brand_folders", {})
         for path, label in folders.items():
-            var = tk.BooleanVar(value=True)
+            var = tk.BooleanVar(value=saved_brand.get(path, True))
             self._chk(self._brand_frame, label, var).pack(anchor="w", padx=12, pady=1)
             self._brand_vars[path] = var
+            var.trace_add("write", lambda *_: self._save_folder_settings())
+
+    def _show_adb_help(self):
+        messagebox.showinfo(
+            "ADB Not Found",
+            "Mnemo requires Android Platform Tools (adb) to communicate with your phone.\n\n"
+            "Setup steps:\n"
+            "  1. Download Platform Tools from:\n"
+            "     https://developer.android.com/tools/releases/platform-tools\n\n"
+            "  2. Extract the zip and add the folder to your system PATH\n"
+            "     (e.g. C:\\platform-tools)\n\n"
+            "  3. On your phone: enable USB Debugging\n"
+            "     Settings → Developer Options → USB Debugging\n\n"
+            "  4. Reconnect your phone and restart Mnemo\n\n"
+            "Verify it works by opening a terminal and running: adb devices",
+        )
+
+    def _on_status_click(self, _event=None):
+        if "ADB not found" in self.status_label.cget("text"):
+            self._show_adb_help()
 
     def _check_adb_on_start(self):
         self._adb_device = None
         self._populate_brand_folders("")
+        self.status_label.configure(text="Checking ADB…")
+        self.status_dot.configure(fg=MUTED)
+        self.start_btn.configure(state="disabled")
+        show_dialog = self._is_first_adb_check
+        self._is_first_adb_check = False
+        threading.Thread(target=self._check_adb_worker, args=(show_dialog,), daemon=True).start()
+
+    def _check_adb_worker(self, show_dialog: bool):
         if not check_adb():
-            self.status_label.configure(text="ADB not found — install Platform Tools")
-            self.status_dot.configure(fg=DANGER)
-            self.start_btn.configure(state="disabled")
+            self.after(0, self.status_label.configure, {"text": "ADB not found — see setup instructions",
+                                                        "cursor": "hand2", "fg": ACCENT})
+            self.after(0, self.status_dot.configure,   {"fg": DANGER})
+            self.after(0, self.start_btn.configure,    {"state": "disabled"})
+            if show_dialog:
+                self.after(0, self._show_adb_help)
             return
         device = get_connected_device()
         if device:
             self._adb_device = device
             name = get_device_name(device) or str(device)
-            self.status_label.configure(text=f"Connected: {name}")
-            self.status_dot.configure(fg=SUCCESS)
-            self.start_btn.configure(state="normal")
+            manufacturer = ""
             try:
                 manufacturer = device.shell("getprop ro.product.manufacturer").strip()
-                self._populate_brand_folders(manufacturer)
             except Exception:
                 pass
+            self.after(0, self.status_label.configure, {"text": f"Connected: {name}",
+                                                        "cursor": "", "fg": MUTED})
+            self.after(0, self.status_dot.configure,   {"fg": SUCCESS})
+            self.after(0, self.start_btn.configure,    {"state": "normal"})
+            self.after(0, self._populate_brand_folders, manufacturer)
         else:
-            self.status_label.configure(text="No device — connect & enable USB Debugging")
-            self.status_dot.configure(fg=WARN)
-            self.start_btn.configure(state="disabled")
+            self.after(0, self.status_label.configure, {"text": "No device — connect & enable USB Debugging",
+                                                        "cursor": "", "fg": MUTED})
+            self.after(0, self.status_dot.configure,   {"fg": WARN})
+            self.after(0, self.start_btn.configure,    {"state": "disabled"})
 
     def _start_backup(self):
         dest = self.dest_var.get().strip()
         if not dest:
             messagebox.showwarning("No destination", "Please select a destination folder.")
             return
-        folders = [f for f, var in self.folder_vars.items() if var.get()]
-        folders += [f for f, var in self._brand_vars.items() if var.get()]
-        folders += list(self.custom_listbox.get(0, "end"))
+        seen = set()
+        folders = []
+        for f in (
+            [f for f, var in self.folder_vars.items() if var.get()]
+            + [f for f, var in self._brand_vars.items() if var.get()]
+            + list(self.custom_listbox.get(0, "end"))
+        ):
+            key = f.rstrip("/")
+            if key not in seen:
+                seen.add(key)
+                folders.append(f)
         if not folders:
             messagebox.showwarning("No folders", "Please select at least one folder to back up.")
             return
         os.makedirs(dest, exist_ok=True)
+        skip_sent   = self.skip_sent_var.get()
+        skip_hidden = self.skip_hidden_var.get()
         self._stop_event.clear()
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
         self.progress["value"] = 0
         self.progress_label.configure(text="")
         self.eta_label.configure(text="")
-        threading.Thread(target=self._run_backup, args=(folders, dest), daemon=True).start()
+        self.log_box.configure(state="normal")
+        self.log_box.delete("1.0", "end")
+        self.log_box.configure(state="disabled")
+        threading.Thread(target=self._run_backup, args=(folders, dest, skip_sent, skip_hidden), daemon=True).start()
 
-    def _run_backup(self, folders: list[str], dest: str):
+    def _run_backup(self, folders: list[str], dest: str, skip_sent: bool, skip_hidden: bool):
         device = self._adb_device or get_connected_device()
         if not device:
             self.after(0, self._log, "ERROR: No device connected.")
@@ -769,33 +907,57 @@ class App(tk.Tk):
             return
 
         total_pulled = total_skipped = total_failed = 0
-        self._log("=" * 48)
-        self._log("  Starting backup...")
-        self._log("=" * 48)
-        skip_sent   = self.skip_sent_var.get()
-        skip_hidden = self.skip_hidden_var.get()
+        self.after(0, self._log, "=" * 48)
+        self.after(0, self._log, "  Starting backup...")
+        self.after(0, self._log, "=" * 48)
+
+        # Pre-scan to get global total for cross-folder progress bar
+        all_remote = {}
+        for folder in folders:
+            files = get_remote_files(device, folder,
+                                     skip_whatsapp_sent=skip_sent,
+                                     skip_hidden=skip_hidden)
+            all_remote[folder] = files
+        def _needs_pull(folder, rp, rs):
+            local = os.path.join(dest, folder.rstrip("/").split("/")[-1],
+                                 rp[len(folder):].lstrip("/").replace("/", os.sep))
+            try:
+                return not (os.path.exists(local) and os.path.getsize(local) == rs)
+            except OSError:
+                return True
+
+        global_total = sum(
+            sum(1 for rp, rs in files if _needs_pull(folder, rp, rs))
+            for folder, files in all_remote.items()
+        ) or 1
+
+        global_offset = 0
         for folder in folders:
             if self._stop_event.is_set():
                 break
             pulled, skipped, failed = incremental_pull(
                 device, folder, dest,
                 log=lambda m: self.after(0, self._log, m),
-                progress_cb=lambda c, t, e=0: self.after(0, self._set_progress, c, t, e),
+                progress_cb=lambda c, t, e=0, r=0: self.after(0, self._set_progress, c, t, e, r),
                 skip_whatsapp_sent=skip_sent,
                 skip_hidden=skip_hidden,
                 stop_event=self._stop_event,
+                global_offset=global_offset,
+                global_total=global_total,
+                _prefetched=all_remote.get(folder),
             )
+            global_offset += pulled + failed
             total_pulled  += pulled
             total_skipped += skipped
             total_failed  += failed
-        self._log("")
-        self._log("=" * 48)
-        self._log(f"  Pulled (new):     {total_pulled}")
-        self._log(f"  Skipped (exists): {total_skipped}")
+        self.after(0, self._log, "")
+        self.after(0, self._log, "=" * 48)
+        self.after(0, self._log, f"  Pulled (new):     {total_pulled}")
+        self.after(0, self._log, f"  Skipped (exists): {total_skipped}")
         if total_failed:
-            self._log(f"  Failed:           {total_failed}")
-        self._log("  Stopped." if self._stop_event.is_set() else "  Done.")
-        self._log("=" * 48)
+            self.after(0, self._log, f"  Failed:           {total_failed}")
+        self.after(0, self._log, "  Stopped." if self._stop_event.is_set() else "  Done.")
+        self.after(0, self._log, "=" * 48)
         self.after(0, self.start_btn.configure, {"state": "normal"})
         self.after(0, self.stop_btn.configure,  {"state": "disabled"})
         self.after(0, self.eta_label.configure,  {"text": ""})
